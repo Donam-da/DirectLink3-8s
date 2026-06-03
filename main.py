@@ -55,14 +55,10 @@ class DirectLinkApp:
         opt_frame = tk.Frame(root)
         opt_frame.grid(row=2, column=0, columnspan=2, sticky="w", padx=pad_x, pady=pad_y)
         
-        tk.Label(opt_frame, text="Tự nghỉ sau:", font=("Arial", 10)).pack(side="left", padx=(10, 2))
-        self.loop_threshold_var = tk.StringVar(value="Không nghỉ")
-        ttk.Combobox(opt_frame, textvariable=self.loop_threshold_var, values=["Không nghỉ", "50", "100", "150", "200"], width=10, state="readonly").pack(side="left")
-
-        tk.Label(opt_frame, text="vòng, nghỉ", font=("Arial", 10)).pack(side="left", padx=2)
-        self.rest_duration_var = tk.StringVar(value="60")
-        ttk.Combobox(opt_frame, textvariable=self.rest_duration_var, values=["30", "60", "90", "120"], width=4, state="readonly").pack(side="left")
-        tk.Label(opt_frame, text="s", font=("Arial", 10)).pack(side="left")
+        tk.Label(opt_frame, text="Số vòng lặp:", font=("Arial", 10)).pack(side="left", padx=(10, 2))
+        # Người dùng có thể chọn mốc hoặc tự gõ vào số vòng lặp mong muốn
+        self.total_loops_var = tk.StringVar(value="Không giới hạn")
+        ttk.Combobox(opt_frame, textvariable=self.total_loops_var, values=["Không giới hạn", "50", "100", "200", "500", "1000"], width=15, state="normal").pack(side="left")
 
         # Thêm Checkbox cấu hình chạy ngầm
         self.headless_var = tk.BooleanVar(value=True)
@@ -112,36 +108,80 @@ class DirectLinkApp:
             self.log_area.config(state="disabled")
         self.root.after(0, _clear)
 
-    def reconnect_wifi_windows(self, ssid):
-        self.log(f"Đang làm mới Wi-Fi: {ssid}...")
-        subprocess.run(['netsh', 'wlan', 'disconnect'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        time.sleep(0.05) # Vừa ngắt mạng xong là kết nối lại luôn
-        
-        result = subprocess.run(['netsh', 'wlan', 'connect', f'name={ssid}'], capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=subprocess.CREATE_NO_WINDOW)
-        output = result.stdout.strip()
-        
-        if result.returncode == 0 and ("successfully" in output.lower() or "thành công" in output.lower() or "hoàn tất" in output.lower()):
-            pass # Thành công, không cần log dồn dập
-        else:
-            subprocess.run(['netsh', 'wlan', 'connect', f'ssid={ssid}', f'name={ssid}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            
-        if self.wait_for_internet():
-            self.log("✓ Internet đã sẵn sàng.")
-            time.sleep(1.5) # Giữ đúng thời gian chờ 1.5s theo ý bạn
-        else:
-            self.log("⚠ Không thể kết nối Internet!")
+    def check_ipv6(self):
+        """Kiểm tra xem máy đã nhận được kết nối IPv6 thực tế ra internet chưa"""
+        try:
+            # Dùng DNS IPv6 của Google để test nhanh
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            sock.connect(("2001:4860:4860::8888", 53))
+            sock.close()
+            return True
+        except OSError:
+            return False
 
-    def wait_for_internet(self, timeout=15):
+    def setup_driver(self, is_headless):
+        """Tách hàm khởi tạo Driver để dễ dàng Refresh Chrome sau mỗi 200 vòng"""
+        options = webdriver.ChromeOptions()
+        options.add_argument("--incognito")
+        options.page_load_strategy = 'none' # Bắn lệnh tải URL xong lập tức sang bước tiếp theo
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--mute-audio")
+        options.add_argument("--disable-web-security")
+        options.add_argument("--blink-settings=imagesEnabled=false")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--remote-allow-origins=*")
+        options.add_argument("--ignore-certificate-errors")
+        
+        if is_headless:
+            options.add_argument("--headless=new")
+
+        prefs = {
+            "profile.managed_default_content_settings.images": 2,
+            "profile.managed_default_content_settings.stylesheets": 2,
+            "profile.managed_default_content_settings.fonts": 2
+        }
+        options.add_experimental_option("prefs", prefs)
+
+        driver = webdriver.Chrome(options=options)
+        try: driver.delete_all_cookies()
+        except Exception: pass
+        return driver
+
+    def clean_tabs_and_cookies(self, driver):
+        try:
+            if len(driver.window_handles) > 1:
+                main_window = driver.window_handles[0]
+                for handle in driver.window_handles[1:]:
+                    driver.switch_to.window(handle)
+                    driver.close()
+                driver.switch_to.window(main_window)
+        except Exception: pass
+        try: driver.delete_all_cookies()
+        except Exception: pass
+
+    def wait_for_internet(self, timeout=5):
         start_time = time.time()
+        has_ipv4 = False
         while time.time() - start_time < timeout:
             if not self.is_running:
                 break
             try:
-                # Giảm timeout từ 1s xuống 0.3s để phát hiện mạng lặp nhanh hơn, tránh treo 1s mỗi lần rớt
-                socket.create_connection(("8.8.8.8", 53), timeout=0.3)
-                return True
+                if not has_ipv4:
+                    socket.create_connection(("8.8.8.8", 53), timeout=0.3)
+                    has_ipv4 = True
+                
+                # Khi đã có IPv4, tiếp tục chờ hệ thống cấp phát xong IPv6
+                if has_ipv4:
+                    if self.check_ipv6():
+                        return True
             except OSError:
-                time.sleep(0.05) # Tăng tốc x2
+                pass
+            time.sleep(0.2) # Chờ một khoảng ngắn, không spam request quá nhanh
         return False
 
     def start_bot(self):
@@ -176,105 +216,121 @@ class DirectLinkApp:
         self.stop_btn.config(state="disabled" if not is_running else "normal")
 
     def bot_task(self, wifi, url, is_headless):
-        threshold_val = self.loop_threshold_var.get()
-        rest_val = self.rest_duration_var.get()
-        threshold = int(threshold_val) if threshold_val.isdigit() else 0
-        rest_duration = int(rest_val) if rest_val.isdigit() else 60
-
-        options = webdriver.ChromeOptions()
-        options.add_argument("--incognito")
-        options.page_load_strategy = 'none' # KHÔNG CHỜ: Bắn lệnh tải URL xong lập tức sang bước tiếp theo
-        options.add_argument("--disable-gpu")
-        options.add_argument("--disable-software-rasterizer")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--mute-audio")
-        options.add_argument("--disable-web-security") # Bỏ qua check bảo mật chéo trang (nhanh hơn)
-        options.add_argument("--blink-settings=imagesEnabled=false") # Ép tắt tải ảnh triệt để từ core
-        options.add_argument("--window-size=1920,1080") # Thêm kích thước ảo để chống crash ở chế độ ẩn
-        options.add_argument("--remote-allow-origins=*") # Sửa lỗi Websocket/Origin
-        options.add_argument("--ignore-certificate-errors") # Bỏ qua lỗi chứng chỉ
-        
-        if is_headless:
-            options.add_argument("--headless=new")
-
-        # Chặn tải Hình ảnh, CSS và Fonts để tiết kiệm băng thông và tăng tốc
-        prefs = {
-            "profile.managed_default_content_settings.images": 2,
-            "profile.managed_default_content_settings.stylesheets": 2,
-            "profile.managed_default_content_settings.fonts": 2
-        }
-        options.add_experimental_option("prefs", prefs)
+        total_loops_str = self.total_loops_var.get()
+        total_loops = -1
+        if total_loops_str.isdigit():
+            total_loops = int(total_loops_str)
 
         driver = None
         
         try:
-            driver = webdriver.Chrome(options=options)
-            try:
-                driver.delete_all_cookies()
-            except Exception:
-                pass
-                
-            self.log(f"Đang chạy URL (Vòng {self.loop_count + 1})...")
-            self.load_url(driver, url)
+            driver = self.setup_driver(is_headless)
 
             while self.is_running:
+                if total_loops > 0 and self.loop_count >= total_loops:
+                    self.log("✓ Đã hoàn thành số lượng vòng lặp yêu cầu!")
+                    break
+
                 self.loop_count += 1
                 
-                if threshold > 0 and self.loop_count > 0 and self.loop_count % threshold == 0:
+                # Đảo quy trình: Đổi IP TRƯỚC khi chạy URL để đảm bảo View 1 cũng được làm mới mạng
+                if self.loop_count > 1 and (self.loop_count - 1) % 200 == 0:
                     self.clear_log()
-                    self.log(f"Đạt mốc {threshold} vòng. Bắt đầu dọn dẹp và nghỉ ngơi {rest_duration}s...")
-                    
-                    subprocess.run(['netsh', 'wlan', 'disconnect'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-                    
-                    try:
-                        if len(driver.window_handles) > 1:
-                            main_window = driver.window_handles[0]
-                            for handle in driver.window_handles[1:]:
-                                driver.switch_to.window(handle)
-                                driver.close()
-                            driver.switch_to.window(main_window)
-                    except Exception:
-                        pass
-
-                    try:
-                        driver.delete_all_cookies()
-                    except Exception:
-                        pass
-                        
-                    for i in range(rest_duration, 0, -1):
-                        if not self.is_running: break
-                        self.root.after(0, lambda sec=i: self.countdown_label.config(text=f"Nghỉ: {sec}s"))
-                        time.sleep(1)
-                    self.root.after(0, lambda: self.countdown_label.config(text=""))
-                    
-                    if self.is_running:
-                        self.log("Tiếp tục chạy...")
-                        self.reconnect_wifi_windows(wifi)
-                        
-                        self.log(f"Đang chạy URL (Vòng {self.loop_count + 1})...")
-                        self.load_url(driver, url)
+                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Xóa dữ liệu (mở lại Chrome) và Reset Wi-Fi 2 lần...")
+                    if driver:
+                        try: driver.quit()
+                        except: pass
+                    network_ok = self.perform_double_wifi_reset(wifi)
+                    driver = self.setup_driver(is_headless)
+                elif self.loop_count > 1 and (self.loop_count - 1) % 25 == 0:
+                    self.clear_log()
+                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Reset Wi-Fi 2 lần và nghỉ 10s...")
+                    self.clean_tabs_and_cookies(driver)
+                    network_ok = self.perform_double_wifi_reset(wifi)
+                    self.rest_countdown(10)
                 else:
-                    self.fast_reconnect_and_load(driver, wifi, url)
+                    network_ok = self.fast_reconnect(wifi)
+                    
+                if not self.is_running: break
+
+                # Nếu quá 5s mạng lỗi/không có IPv6 thì lập tức nhảy sang làm mới vòng lặp khác, KHÔNG tải URL
+                if not network_ok:
+                    self.log("⚠ Mạng lỗi/thiếu IPv6. Bỏ qua view này và thử lại ở vòng mới ngay...")
+                    continue
+
+                self.log(f"Đang chạy URL (Vòng {self.loop_count})...")
+                self.load_url(driver, url)
                     
         except Exception as e:
             self.log(f"Lỗi: {e}")
         finally:
             if driver:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+                try: driver.quit()
+                except Exception: pass
 
         self.is_running = False
         self.root.after(0, lambda: self.set_buttons_state(False))
+
+    def perform_double_wifi_reset(self, ssid):
+        """Thực hiện nhồi reset wifi 2 lần liên tiếp để lấy IP thực sự mới"""
+        success = False
+        for i in range(2):
+            if not self.is_running: break
+            self.log(f"Tiến hành Reset Wi-Fi lần {i + 1}/2...")
+            subprocess.run(['netsh', 'wlan', 'disconnect'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            time.sleep(1.0)
+            
+            result = subprocess.run(['netsh', 'wlan', 'connect', f'name={ssid}'], capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=subprocess.CREATE_NO_WINDOW)
+            output = result.stdout.strip()
+            if result.returncode != 0 or ("successfully" not in output.lower() and "thành công" not in output.lower() and "hoàn tất" not in output.lower()):
+                subprocess.run(['netsh', 'wlan', 'connect', f'ssid={ssid}', f'name={ssid}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            
+            if self.wait_for_internet(timeout=5):
+                self.log(f"✓ Wi-Fi (kèm IPv6) đã sẵn sàng (Lần {i + 1}/2).")
+                success = True
+            else:
+                self.log(f"⚠ Mạng chưa ổn định (Lần {i + 1}/2).")
+                success = False
+            
+            if i == 0: # Chỉ chờ một chút ở lần trung gian giữa 2 lần reset
+                time.sleep(1.0)
+        return success
+
+    def rest_countdown(self, seconds):
+        self.log(f"Bắt đầu nghỉ {seconds}s...")
+        for i in range(seconds, 0, -1):
+            if not self.is_running: break
+            self.root.after(0, lambda sec=i: self.countdown_label.config(text=f"Nghỉ: {sec}s"))
+            time.sleep(1)
+        self.root.after(0, lambda: self.countdown_label.config(text=""))
+
+    def fast_reconnect(self, ssid):
+        self.log(f"Đang làm mới Wi-Fi: {ssid}...")
+        
+        subprocess.run(['netsh', 'wlan', 'disconnect'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        time.sleep(1.0) 
+
+        result = subprocess.run(['netsh', 'wlan', 'connect', f'name={ssid}'], capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=subprocess.CREATE_NO_WINDOW)
+        output = result.stdout.strip()
+        
+        if result.returncode == 0 and ("successfully" in output.lower() or "thành công" in output.lower() or "hoàn tất" in output.lower()):
+            pass
+        else:
+            subprocess.run(['netsh', 'wlan', 'connect', f'ssid={ssid}', f'name={ssid}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+        if self.wait_for_internet(timeout=5):
+            self.log("✓ Internet (kèm IPv6) đã sẵn sàng.")
+            time.sleep(1.5) 
+            return True
+        else:
+            self.log("⚠ Không thể kết nối hoặc thiếu IPv6!")
+            return False
 
     def load_url(self, driver, url):
         while self.is_running:
             try:
                 driver.get(url)
-                timeout = 10
+                timeout = 5
                 start_time = time.time()
                 redirected = False
                 
@@ -292,35 +348,12 @@ class DirectLinkApp:
                     time.sleep(0.05) # Quét URL 20 lần/giây, xé gió bắt khoảnh khắc nhảy link
                     
                 if not redirected:
-                    self.log("✓ JS đã chạy xong (Không thấy URL thay đổi, có thể đã tính view).")
+                    self.log("⚠ Quá 5s không chuyển hướng (có thể lỗi mạng), bỏ qua view.")
                 
                 break
             except Exception:
                 if not self.is_running: break
                 time.sleep(0.1)
-
-    def fast_reconnect_and_load(self, driver, ssid, url):
-        self.log(f"Đang làm mới Wi-Fi: {ssid}...")
-        
-        subprocess.run(['netsh', 'wlan', 'disconnect'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        time.sleep(0.05) # Cực hạn: ngắt xong nối lại gần như ngay lập tức
-
-        result = subprocess.run(['netsh', 'wlan', 'connect', f'name={ssid}'], capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=subprocess.CREATE_NO_WINDOW)
-        output = result.stdout.strip()
-        
-        if result.returncode == 0 and ("successfully" in output.lower() or "thành công" in output.lower() or "hoàn tất" in output.lower()):
-            pass
-        else:
-            subprocess.run(['netsh', 'wlan', 'connect', f'ssid={ssid}', f'name={ssid}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-
-        if self.wait_for_internet():
-            self.log("✓ Internet đã sẵn sàng.")
-            time.sleep(1.5) # Giữ đúng thời gian chờ 1.5s theo ý bạn
-        else:
-            self.log("⚠ Không thể kết nối Internet!")
-
-        self.log(f"Đang chạy URL (Vòng {self.loop_count + 1})...")
-        self.load_url(driver, url)
 
 if __name__ == "__main__":
     root = tk.Tk()
