@@ -5,6 +5,15 @@ import threading
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, ttk
 from selenium import webdriver
+import json
+import base64
+import hashlib
+import hmac
+import datetime
+import os
+
+# BẠN HÃY THAY ĐỔI CHUỖI NÀY THÀNH MỘT MẬT KHẨU BÍ MẬT CỦA RIÊNG BẠN
+SECRET_KEY = b"THAY_DOI_CHUOI_NAY_THANH_MAT_KHAU_CUA_BAN"
 
 def get_current_wifi_profile():
     """Tự động lấy tên Profile Wi-Fi đang kết nối hiện tại"""
@@ -23,9 +32,88 @@ def get_current_wifi_profile():
         pass
     return ""
 
-class DirectLinkApp:
-    def __init__(self, root):
+def get_hwid():
+    """Lấy mã định danh phần cứng (UUID) của máy Windows"""
+    try:
+        hwid = subprocess.check_output('wmic csproduct get uuid', creationflags=subprocess.CREATE_NO_WINDOW).decode().split('\n')[1].strip()
+        return hwid
+    except Exception:
+        return "UNKNOWN_HWID"
+
+def validate_key(key, hwid):
+    """Giải mã và kiểm tra tính hợp lệ của Key"""
+    try:
+        payload = json.loads(base64.b64decode(key).decode('utf-8'))
+        data_str = payload['data']
+        sig = payload['sig']
+        
+        expected_sig = hmac.new(SECRET_KEY, data_str.encode('utf-8'), hashlib.sha256).hexdigest()
+        if expected_sig != sig:
+            return False, "Key không hợp lệ hoặc đã bị thay đổi!"
+            
+        data = json.loads(data_str)
+        if data['hwid'] != hwid:
+            return False, "Key này không dành cho máy này (Sai mã HWID)!"
+            
+        exp_date = datetime.datetime.strptime(data['exp'], "%Y-%m-%d %H:%M")
+        if datetime.datetime.now() > exp_date:
+            return False, "Key đã hết hạn sử dụng!"
+            
+        return True, exp_date
+    except Exception:
+        return False, "Key sai định dạng!"
+
+class AuthWindow:
+    def __init__(self, root, on_success):
         self.root = root
+        self.on_success = on_success
+        self.root.title("Kích hoạt bản quyền")
+        self.root.geometry("450x250")
+        
+        self.hwid = get_hwid()
+        
+        tk.Label(root, text="Mã máy (HWID) của bạn:", font=("Arial", 10, "bold")).pack(pady=(20, 5))
+        
+        hwid_frame = tk.Frame(root)
+        hwid_frame.pack()
+        self.hwid_entry = tk.Entry(hwid_frame, width=40, font=("Arial", 10))
+        self.hwid_entry.insert(0, self.hwid)
+        self.hwid_entry.configure(state='readonly')
+        self.hwid_entry.pack(side="left", padx=5)
+        
+        tk.Button(hwid_frame, text="Copy", command=lambda: (self.root.clipboard_clear(), self.root.clipboard_append(self.hwid))).pack(side="left")
+        
+        tk.Label(root, text="Nhập Key kích hoạt:", font=("Arial", 10, "bold")).pack(pady=(15, 5))
+        self.key_entry = tk.Entry(root, width=50, font=("Arial", 10))
+        self.key_entry.pack(pady=5)
+        
+        tk.Button(root, text="Kích Hoạt", bg="#4CAF50", fg="white", font=("Arial", 10, "bold"), command=self.check_activation).pack(pady=15)
+
+        self.key_file = "license.key"
+        if os.path.exists(self.key_file):
+            with open(self.key_file, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+                is_valid, result = validate_key(key, self.hwid)
+                if is_valid:
+                    self.on_success(result) # Key ok, tự động vào app, truyền thời gian hết hạn vào
+                else:
+                    self.key_entry.insert(0, key) # Sai hoặc hết hạn, hiện lại key cũ lên
+
+    def check_activation(self):
+        key = self.key_entry.get().strip()
+        is_valid, result = validate_key(key, self.hwid)
+        if is_valid:
+            with open(self.key_file, "w", encoding="utf-8") as f:
+                f.write(key)
+            messagebox.showinfo("Thành công", "Kích hoạt phần mềm thành công!")
+            self.on_success(result)
+        else:
+            messagebox.showerror("Lỗi Kích Hoạt", result)
+
+class DirectLinkApp:
+    def __init__(self, root, exp_date):
+        self.root = root
+        self.exp_date = exp_date
         self.root.title("DirectLink Auto Bot")
         self.root.geometry("650x380")
         
@@ -227,6 +315,12 @@ class DirectLinkApp:
             driver = self.setup_driver(is_headless)
 
             while self.is_running:
+                # Kiểm tra hạn sử dụng liên tục trong lúc chạy
+                if datetime.datetime.now() > self.exp_date:
+                    self.log("⚠ KEY ĐÃ HẾT HẠN! Dừng phần mềm...")
+                    self.root.after(0, lambda: messagebox.showwarning("Hết hạn", "Key kích hoạt của bạn đã hết thời gian sử dụng!"))
+                    break
+
                 if total_loops > 0 and self.loop_count >= total_loops:
                     self.log("✓ Đã hoàn thành số lượng vòng lặp yêu cầu!")
                     break
@@ -236,18 +330,18 @@ class DirectLinkApp:
                 # Đảo quy trình: Đổi IP TRƯỚC khi chạy URL để đảm bảo View 1 cũng được làm mới mạng
                 if self.loop_count > 1 and (self.loop_count - 1) % 200 == 0:
                     self.clear_log()
-                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Xóa dữ liệu (mở lại Chrome) và Reset Wi-Fi 2 lần...")
+                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Xóa dữ liệu (mở lại Chrome), Reset Wi-Fi 2 lần và nghỉ 10s...")
                     if driver:
                         try: driver.quit()
                         except: pass
                     network_ok = self.perform_double_wifi_reset(wifi)
+                    self.rest_countdown(10)
                     driver = self.setup_driver(is_headless)
                 elif self.loop_count > 1 and (self.loop_count - 1) % 25 == 0:
                     self.clear_log()
-                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Reset Wi-Fi 2 lần và nghỉ 10s...")
+                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Reset Wi-Fi 1 lần...")
                     self.clean_tabs_and_cookies(driver)
-                    network_ok = self.perform_double_wifi_reset(wifi)
-                    self.rest_countdown(10)
+                    network_ok = self.fast_reconnect(wifi)
                 else:
                     network_ok = self.fast_reconnect(wifi)
                     
@@ -320,7 +414,7 @@ class DirectLinkApp:
 
         if self.wait_for_internet(timeout=5):
             self.log("✓ Internet (kèm IPv6) đã sẵn sàng.")
-            time.sleep(1.5) 
+            time.sleep(1.0) 
             return True
         else:
             self.log("⚠ Không thể kết nối hoặc thiếu IPv6!")
@@ -357,5 +451,11 @@ class DirectLinkApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = DirectLinkApp(root)
+    
+    def start_main_app(exp_date):
+        for widget in root.winfo_children():
+            widget.destroy()
+        app = DirectLinkApp(root, exp_date)
+        
+    AuthWindow(root, start_main_app)
     root.mainloop()
