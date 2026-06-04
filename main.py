@@ -317,8 +317,11 @@ class DirectLinkApp:
             while self.is_running:
                 # Kiểm tra hạn sử dụng liên tục trong lúc chạy
                 if datetime.datetime.now() > self.exp_date:
-                    self.log("⚠ KEY ĐÃ HẾT HẠN! Dừng phần mềm...")
-                    self.root.after(0, lambda: messagebox.showwarning("Hết hạn", "Key kích hoạt của bạn đã hết thời gian sử dụng!"))
+                    self.log("⚠ KEY ĐÃ HẾT HẠN! Đang tắt phần mềm...")
+                    def force_exit():
+                        messagebox.showwarning("Hết hạn", "Key kích hoạt của bạn đã hết thời gian sử dụng!\nPhần mềm sẽ tự động thoát.")
+                        os._exit(0) # Ép buộc đóng hẳn toàn bộ file exe ngay lập tức
+                    self.root.after(0, force_exit)
                     break
 
                 if total_loops > 0 and self.loop_count >= total_loops:
