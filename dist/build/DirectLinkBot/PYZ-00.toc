@@ -78,6 +78,7 @@
   ('glob', 'C:\\Python314\\Lib\\glob.py', 'PYMODULE'),
   ('gzip', 'C:\\Python314\\Lib\\gzip.py', 'PYMODULE'),
   ('hashlib', 'C:\\Python314\\Lib\\hashlib.py', 'PYMODULE'),
+  ('hmac', 'C:\\Python314\\Lib\\hmac.py', 'PYMODULE'),
   ('http', 'C:\\Python314\\Lib\\http\\__init__.py', 'PYMODULE'),
   ('http.client', 'C:\\Python314\\Lib\\http\\client.py', 'PYMODULE'),
   ('http.cookiejar', 'C:\\Python314\\Lib\\http\\cookiejar.py', 'PYMODULE'),
