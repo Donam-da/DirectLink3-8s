@@ -11,6 +11,8 @@ import hashlib
 import hmac
 import datetime
 import os
+import sys
+import ctypes
 
 # BẠN HÃY THAY ĐỔI CHUỖI NÀY THÀNH MỘT MẬT KHẨU BÍ MẬT CỦA RIÊNG BẠN
 SECRET_KEY = b"THAY_DOI_CHUOI_NAY_THANH_MAT_KHAU_CUA_BAN"
@@ -126,13 +128,25 @@ class DirectLinkApp:
         pad_x = 10
         pad_y = 5
 
-        # Wi-Fi Profile
-        tk.Label(root, text="Tên Wi-Fi (SSID):", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", padx=pad_x, pady=pad_y)
-        self.wifi_entry = tk.Entry(root, width=50, font=("Arial", 10))
-        self.wifi_entry.grid(row=0, column=1, padx=pad_x, pady=pad_y)
+        # Network Profile
+        tk.Label(root, text="Loại mạng:", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", padx=pad_x, pady=pad_y)
+        
+        net_frame = tk.Frame(root)
+        net_frame.grid(row=0, column=1, sticky="w", padx=pad_x, pady=pad_y)
+        
+        self.net_type_var = tk.StringVar(value="Wi-Fi")
+        self.net_type_cb = ttk.Combobox(net_frame, textvariable=self.net_type_var, values=["Wi-Fi", "Ethernet"], width=10, state="readonly")
+        self.net_type_cb.pack(side="left")
+        
+        tk.Label(net_frame, text=" Tên:", font=("Arial", 10)).pack(side="left")
+        self.wifi_entry = tk.Entry(net_frame, width=28, font=("Arial", 10))
+        self.wifi_entry.pack(side="left", padx=5)
+        
         current_wifi = get_current_wifi_profile()
         if current_wifi:
             self.wifi_entry.insert(0, current_wifi)
+            
+        self.net_type_cb.bind("<<ComboboxSelected>>", self.on_net_type_change)
 
         # Target URL
         tk.Label(root, text="URL cần chạy:", font=("Arial", 10, "bold")).grid(row=1, column=0, sticky="w", padx=pad_x, pady=pad_y)
@@ -184,6 +198,15 @@ class DirectLinkApp:
 
         # Bắt đầu kiểm tra hạn sử dụng định kỳ ngay cả khi không chạy bot
         self.check_expiry_periodic()
+        
+    def on_net_type_change(self, event=None):
+        self.wifi_entry.delete(0, tk.END)
+        if self.net_type_var.get() == "Ethernet":
+            self.wifi_entry.insert(0, "Ethernet")
+        else:
+            current_wifi = get_current_wifi_profile()
+            if current_wifi:
+                self.wifi_entry.insert(0, current_wifi)
 
     def load_saved_url(self):
         if os.path.exists(self.config_file):
@@ -306,9 +329,10 @@ class DirectLinkApp:
     def start_bot(self):
         wifi = self.wifi_entry.get().strip()
         url = self.url_entry.get().strip()
+        net_type = self.net_type_var.get()
         
         if not wifi or not url:
-            messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập đủ Tên Wi-Fi và URL!")
+            messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập đủ Tên mạng và URL!")
             return
             
         self.save_url(url)
@@ -319,10 +343,12 @@ class DirectLinkApp:
         self.loop_count = 0
         self.countdown_label.config(text="")
         self.log("▶ Bắt đầu chạy Bot...")
+        if net_type == "Ethernet":
+            self.log("Lưu ý: Công cụ phải được chạy bằng quyền Administrator để đổi MAC!")
 
         is_headless = self.headless_var.get()
         # Khởi chạy trong Thread riêng để không block giao diện
-        self.thread = threading.Thread(target=self.bot_task, args=(wifi, url, is_headless), daemon=True)
+        self.thread = threading.Thread(target=self.bot_task, args=(wifi, url, is_headless, net_type), daemon=True)
         self.thread.start()
 
     def stop_bot(self):
@@ -336,7 +362,7 @@ class DirectLinkApp:
         self.start_btn.config(state=state)
         self.stop_btn.config(state="disabled" if not is_running else "normal")
 
-    def bot_task(self, wifi, url, is_headless):
+    def bot_task(self, wifi, url, is_headless, net_type):
         total_loops_str = self.total_loops_var.get()
         total_loops = -1
         if total_loops_str.isdigit():
@@ -345,7 +371,8 @@ class DirectLinkApp:
         driver = None
         
         try:
-            driver = self.setup_driver(is_headless)
+            if net_type != "Ethernet":
+                driver = self.setup_driver(is_headless)
 
             while self.is_running:
                 # Kiểm tra hạn sử dụng liên tục trong lúc chạy
@@ -359,23 +386,33 @@ class DirectLinkApp:
 
                 self.loop_count += 1
                 
+                # Chế độ test thiết kế: Chỉ đổi MAC cho Ethernet và bỏ qua toàn bộ phần còn lại
+                if net_type == "Ethernet":
+                    self.log(f"Vòng {self.loop_count}: Đang đổi MAC cho {wifi}...")
+                    ps_command = f'$randomMAC = ("02" + ((1..5) | ForEach-Object {{ "{{0:X2}}" -f (Get-Random -Min 0 -Max 256) }}) -join "").Replace(" ",""); Set-NetAdapterAdvancedProperty -Name "{wifi}" -DisplayName "Network Address" -DisplayValue $randomMAC -NoRestart; Restart-NetAdapter -Name "{wifi}"; Write-Output $randomMAC'
+                    result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    new_mac = result.stdout.strip()
+                    self.log(f"✓ Đổi MAC thành công: {new_mac}. Nghỉ 3s trước khi lặp lại...")
+                    time.sleep(3)
+                    continue
+                
                 # Đảo quy trình: Đổi IP TRƯỚC khi chạy URL để đảm bảo View 1 cũng được làm mới mạng
                 if self.loop_count > 1 and (self.loop_count - 1) % 200 == 0:
                     self.clear_log()
-                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Xóa dữ liệu (mở lại Chrome), Reset Wi-Fi 2 lần và nghỉ 10s...")
+                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Xóa dữ liệu (mở lại Chrome), Reset mạng 2 lần và nghỉ 10s...")
                     if driver:
                         try: driver.quit()
                         except: pass
-                    network_ok = self.perform_double_wifi_reset(wifi)
+                    network_ok = self.perform_double_network_reset(wifi, net_type)
                     self.rest_countdown(10)
                     driver = self.setup_driver(is_headless)
                 elif self.loop_count > 1 and (self.loop_count - 1) % 25 == 0:
                     self.clear_log()
-                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Reset Wi-Fi 1 lần...")
+                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Reset mạng 1 lần...")
                     self.clean_tabs_and_cookies(driver)
-                    network_ok = self.fast_reconnect(wifi)
+                    network_ok = self.fast_reconnect(wifi, net_type)
                 else:
-                    network_ok = self.fast_reconnect(wifi)
+                    network_ok = self.fast_reconnect(wifi, net_type)
                     
                 if not self.is_running: break
 
@@ -397,29 +434,37 @@ class DirectLinkApp:
         self.is_running = False
         self.root.after(0, lambda: self.set_buttons_state(False))
 
-    def perform_double_wifi_reset(self, ssid):
-        """Thực hiện nhồi reset wifi 2 lần liên tiếp để lấy IP thực sự mới"""
+    def perform_double_network_reset(self, network_name, net_type):
+        """Thực hiện nhồi reset mạng 2 lần liên tiếp để lấy IP thực sự mới"""
         success = False
         for i in range(2):
             if not self.is_running: break
-            self.log(f"Tiến hành Reset Wi-Fi lần {i + 1}/2...")
-            subprocess.run(['netsh', 'wlan', 'disconnect'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            time.sleep(1.0)
+            self.log(f"Tiến hành Reset {net_type} lần {i + 1}/2...")
             
-            result = subprocess.run(['netsh', 'wlan', 'connect', f'name={ssid}'], capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=subprocess.CREATE_NO_WINDOW)
-            output = result.stdout.strip()
-            if result.returncode != 0 or ("successfully" not in output.lower() and "thành công" not in output.lower() and "hoàn tất" not in output.lower()):
-                subprocess.run(['netsh', 'wlan', 'connect', f'ssid={ssid}', f'name={ssid}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            if net_type == "Wi-Fi":
+                subprocess.run(['netsh', 'wlan', 'disconnect'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                time.sleep(1.0)
+                
+                result = subprocess.run(['netsh', 'wlan', 'connect', f'name={network_name}'], capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=subprocess.CREATE_NO_WINDOW)
+                output = result.stdout.strip()
+                if result.returncode != 0 or ("successfully" not in output.lower() and "thành công" not in output.lower() and "hoàn tất" not in output.lower()):
+                    subprocess.run(['netsh', 'wlan', 'connect', f'ssid={network_name}', f'name={network_name}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                ps_command = f'$randomMAC = ("02" + ((1..5) | ForEach-Object {{ "{{0:X2}}" -f (Get-Random -Min 0 -Max 256) }}) -join "").Replace(" ",""); Set-NetAdapterAdvancedProperty -Name "{network_name}" -DisplayName "Network Address" -DisplayValue $randomMAC -NoRestart; Restart-NetAdapter -Name "{network_name}"; Write-Output $randomMAC'
+                result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                new_mac = result.stdout.strip()
+                self.log(f"Đã tạo MAC mới: {new_mac}")
+                time.sleep(1.0)
             
-            if self.wait_for_internet(timeout=5):
-                self.log(f"✓ Wi-Fi (kèm IPv6) đã sẵn sàng (Lần {i + 1}/2).")
+            if self.wait_for_internet(timeout=10 if net_type == "Ethernet" else 5):
+                self.log(f"✓ {net_type} (kèm IPv6) đã sẵn sàng (Lần {i + 1}/2).")
                 success = True
             else:
                 self.log(f"⚠ Mạng chưa ổn định (Lần {i + 1}/2).")
                 success = False
             
             if i == 0: # Chỉ chờ một chút ở lần trung gian giữa 2 lần reset
-                time.sleep(1.0)
+                time.sleep(2.0 if net_type == "Ethernet" else 1.0)
         return success
 
     def rest_countdown(self, seconds):
@@ -430,21 +475,27 @@ class DirectLinkApp:
             time.sleep(1)
         self.root.after(0, lambda: self.countdown_label.config(text=""))
 
-    def fast_reconnect(self, ssid):
-        self.log(f"Đang làm mới Wi-Fi: {ssid}...")
+    def fast_reconnect(self, network_name, net_type):
+        self.log(f"Đang làm mới {net_type}: {network_name}...")
         
-        subprocess.run(['netsh', 'wlan', 'disconnect'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        time.sleep(1.0) 
+        if net_type == "Wi-Fi":
+            subprocess.run(['netsh', 'wlan', 'disconnect'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            time.sleep(1.0) 
 
-        result = subprocess.run(['netsh', 'wlan', 'connect', f'name={ssid}'], capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=subprocess.CREATE_NO_WINDOW)
-        output = result.stdout.strip()
-        
-        if result.returncode == 0 and ("successfully" in output.lower() or "thành công" in output.lower() or "hoàn tất" in output.lower()):
-            pass
+            result = subprocess.run(['netsh', 'wlan', 'connect', f'name={network_name}'], capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=subprocess.CREATE_NO_WINDOW)
+            output = result.stdout.strip()
+            
+            if result.returncode == 0 and ("successfully" in output.lower() or "thành công" in output.lower() or "hoàn tất" in output.lower()):
+                pass
+            else:
+                subprocess.run(['netsh', 'wlan', 'connect', f'ssid={network_name}', f'name={network_name}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         else:
-            subprocess.run(['netsh', 'wlan', 'connect', f'ssid={ssid}', f'name={ssid}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            ps_command = f'$randomMAC = ("02" + ((1..5) | ForEach-Object {{ "{{0:X2}}" -f (Get-Random -Min 0 -Max 256) }}) -join "").Replace(" ",""); Set-NetAdapterAdvancedProperty -Name "{network_name}" -DisplayName "Network Address" -DisplayValue $randomMAC -NoRestart; Restart-NetAdapter -Name "{network_name}"; Write-Output $randomMAC'
+            result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            new_mac = result.stdout.strip()
+            self.log(f"Đã tạo MAC mới: {new_mac}")
 
-        if self.wait_for_internet(timeout=5):
+        if self.wait_for_internet(timeout=10 if net_type == "Ethernet" else 5):
             self.log("✓ Internet (kèm IPv6) đã sẵn sàng.")
             time.sleep(1.0) 
             return True
@@ -482,6 +533,17 @@ class DirectLinkApp:
                 time.sleep(0.1)
 
 if __name__ == "__main__":
+    # Kiểm tra và tự động xin quyền Admin nếu chạy file main.py trực tiếp
+    def is_admin():
+        try: return ctypes.windll.shell32.IsUserAnAdmin()
+        except: return False
+
+    if not is_admin():
+        script = os.path.abspath(sys.argv[0])
+        params = ' '.join([f'"{arg}"' for arg in sys.argv[1:]])
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{script}" {params}', None, 1)
+        sys.exit()
+
     root = tk.Tk()
     
     def start_main_app(exp_date):
@@ -489,5 +551,8 @@ if __name__ == "__main__":
             widget.destroy()
         app = DirectLinkApp(root, exp_date)
         
-    AuthWindow(root, start_main_app)
+    # Tạm thời vô hiệu hóa cửa sổ yêu cầu Key để test nhanh
+    # AuthWindow(root, start_main_app)
+    # Đi thẳng vào phần mềm với ngày hết hạn ảo là 31/12/2099
+    start_main_app(datetime.datetime(2099, 12, 31))
     root.mainloop()
