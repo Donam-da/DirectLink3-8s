@@ -34,6 +34,93 @@ def get_current_wifi_profile():
         pass
     return ""
 
+def auto_detect_network():
+    """Tự động phát hiện Card mạng đang dùng Internet (Hỗ trợ cả Wi-Fi laptop và USB Wi-Fi)"""
+    try:
+        ps_command = """
+        $routes = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue
+        if ($routes) {
+            $activeIfIndex = $routes[0].InterfaceIndex
+            $adapter = Get-NetAdapter -InterfaceIndex $activeIfIndex -ErrorAction SilentlyContinue
+            if ($adapter) {
+                $isUSB = ($adapter.InterfaceDescription -match 'USB') -or ($adapter.PnPDeviceID -match '^USB')
+                $media = $adapter.MediaType
+                $name = $adapter.Name
+                Write-Output "$name|$media|$isUSB"
+            }
+        }
+        """
+        result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        output = result.stdout.strip()
+        if output:
+            parts = output.split('|')
+            if len(parts) >= 3:
+                name = parts[0]
+                media = parts[1]
+                is_usb = parts[2].strip().lower() == 'true'
+                
+                if '802.11' in media or 'Wi-Fi' in name or 'Wireless' in name:
+                    if is_usb:
+                        return "Ethernet", name
+                    else:
+                        ssid = get_current_wifi_profile()
+                        return "Wi-Fi", ssid if ssid else name
+                else:
+                    return "Ethernet", name
+    except Exception:
+        pass
+    
+    ssid = get_current_wifi_profile()
+    if ssid:
+        return "Wi-Fi", ssid
+    return "Wi-Fi", "Wi-Fi"
+
+def auto_detect_network():
+    """Tự động phát hiện Card mạng đang dùng Internet (hỗ trợ nhận diện USB Wi-Fi)"""
+    try:
+        ps_command = """
+        $routes = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue
+        if ($routes) {
+            $activeIfIndex = $routes[0].InterfaceIndex
+            $adapter = Get-NetAdapter -InterfaceIndex $activeIfIndex -ErrorAction SilentlyContinue
+            if ($adapter) {
+                $isUSB = ($adapter.InterfaceDescription -match 'USB') -or ($adapter.PnPDeviceID -match '^USB')
+                $media = $adapter.MediaType
+                $name = $adapter.Name
+                Write-Output "$name|$media|$isUSB"
+            }
+        }
+        """
+        result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        output = result.stdout.strip()
+        if output:
+            parts = output.split('|')
+            if len(parts) >= 3:
+                name = parts[0]
+                media = parts[1]
+                is_usb = parts[2].strip().lower() == 'true'
+                
+                # Nếu là mạng không dây (Wi-Fi)
+                if '802.11' in media or 'Wi-Fi' in name or 'Wireless' in name:
+                    if is_usb:
+                        # Là USB Wi-Fi -> Chuyển sang kịch bản Ethernet, lấy tên Card mạng vật lý
+                        return "Ethernet", name
+                    else:
+                        # Là Laptop Wi-Fi -> Kịch bản Wi-Fi, lấy tên Profile (SSID)
+                        ssid = get_current_wifi_profile()
+                        return "Wi-Fi", ssid if ssid else name
+                else:
+                    # Là mạng dây cắm cáp quang bình thường
+                    return "Ethernet", name
+    except Exception:
+        pass
+    
+    # Fallback dự phòng nếu PowerShell lỗi
+    ssid = get_current_wifi_profile()
+    if ssid:
+        return "Wi-Fi", ssid
+    return "Wi-Fi", "Wi-Fi"
+
 def get_hwid():
     """Lấy mã định danh phần cứng (UUID) của máy Windows"""
     try:
@@ -134,7 +221,9 @@ class DirectLinkApp:
         net_frame = tk.Frame(root)
         net_frame.grid(row=0, column=1, sticky="w", padx=pad_x, pady=pad_y)
         
-        self.net_type_var = tk.StringVar(value="Wi-Fi")
+        detected_type, detected_name = auto_detect_network()
+        
+        self.net_type_var = tk.StringVar(value=detected_type)
         self.net_type_cb = ttk.Combobox(net_frame, textvariable=self.net_type_var, values=["Wi-Fi", "Ethernet"], width=10, state="readonly")
         self.net_type_cb.pack(side="left")
         
@@ -142,9 +231,7 @@ class DirectLinkApp:
         self.wifi_entry = tk.Entry(net_frame, width=28, font=("Arial", 10))
         self.wifi_entry.pack(side="left", padx=5)
         
-        current_wifi = get_current_wifi_profile()
-        if current_wifi:
-            self.wifi_entry.insert(0, current_wifi)
+        self.wifi_entry.insert(0, detected_name)
             
         self.net_type_cb.bind("<<ComboboxSelected>>", self.on_net_type_change)
 
@@ -202,11 +289,16 @@ class DirectLinkApp:
     def on_net_type_change(self, event=None):
         self.wifi_entry.delete(0, tk.END)
         if self.net_type_var.get() == "Ethernet":
-            self.wifi_entry.insert(0, "Ethernet")
+            try:
+                ps_command = "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -First 1 -ExpandProperty Name"
+                result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                name = result.stdout.strip()
+                self.wifi_entry.insert(0, name if name else "Ethernet")
+            except:
+                self.wifi_entry.insert(0, "Ethernet")
         else:
-            current_wifi = get_current_wifi_profile()
-            if current_wifi:
-                self.wifi_entry.insert(0, current_wifi)
+            ssid = get_current_wifi_profile()
+            self.wifi_entry.insert(0, ssid if ssid else "Wi-Fi")
 
     def load_saved_url(self):
         if os.path.exists(self.config_file):
@@ -362,6 +454,19 @@ class DirectLinkApp:
         self.start_btn.config(state=state)
         self.stop_btn.config(state="disabled" if not is_running else "normal")
 
+    def prepare_next_mac(self, network_name):
+        self.log("Đang nạp sẵn MAC mới cho vòng tiếp theo...")
+        ps_command = f'$randomMAC = ("02" + ((1..5) | ForEach-Object {{ "{{0:X2}}" -f (Get-Random -Min 0 -Max 256) }}) -join "").Replace(" ",""); Set-NetAdapterAdvancedProperty -Name "{network_name}" -RegistryKeyword "NetworkAddress" -RegistryValue $randomMAC -NoRestart; Write-Output $randomMAC'
+        result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        new_mac = result.stdout.strip()
+        if new_mac:
+            formatted_mac = ":".join([new_mac[i:i+2] for i in range(0, len(new_mac), 2)])
+            self.log(f"Đã nạp sẵn MAC: {formatted_mac} (Sẽ áp dụng khi reset mạng)")
+        elif result.stderr:
+            self.log("⚠ Lỗi: Card không hỗ trợ đổi MAC hoặc sai Tên mạng!")
+        else:
+            self.log("Đã nạp sẵn MAC cho vòng sau")
+
     def bot_task(self, wifi, url, is_headless, net_type):
         total_loops_str = self.total_loops_var.get()
         total_loops = -1
@@ -371,8 +476,12 @@ class DirectLinkApp:
         driver = None
         
         try:
-            if net_type != "Ethernet":
-                driver = self.setup_driver(is_headless)
+            if net_type == "Ethernet":
+                self.log(f"Đang nạp MAC khởi động cho vòng 1 ({net_type})...")
+                self.prepare_next_mac(wifi)
+
+            # Khởi tạo Chrome cho cả Wi-Fi và Ethernet
+            driver = self.setup_driver(is_headless)
 
             while self.is_running:
                 # Kiểm tra hạn sử dụng liên tục trong lúc chạy
@@ -386,31 +495,20 @@ class DirectLinkApp:
 
                 self.loop_count += 1
                 
-                # Chế độ test thiết kế: Chỉ đổi MAC cho Ethernet và bỏ qua toàn bộ phần còn lại
-                if net_type == "Ethernet":
-                    self.log(f"Vòng {self.loop_count}: Đang đổi MAC cho {wifi}...")
-                    ps_command = f'$randomMAC = ("02" + ((1..5) | ForEach-Object {{ "{{0:X2}}" -f (Get-Random -Min 0 -Max 256) }}) -join "").Replace(" ",""); Set-NetAdapterAdvancedProperty -Name "{wifi}" -DisplayName "Network Address" -DisplayValue $randomMAC -NoRestart; Restart-NetAdapter -Name "{wifi}"; Write-Output $randomMAC'
-                    result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-                    new_mac = result.stdout.strip()
-                    self.log(f"✓ Đổi MAC thành công: {new_mac}. Nghỉ 3s trước khi lặp lại...")
-                    time.sleep(3)
-                    continue
-                
                 # Đảo quy trình: Đổi IP TRƯỚC khi chạy URL để đảm bảo View 1 cũng được làm mới mạng
                 if self.loop_count > 1 and (self.loop_count - 1) % 200 == 0:
                     self.clear_log()
-                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Xóa dữ liệu (mở lại Chrome), Reset mạng 2 lần và nghỉ 10s...")
+                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Đóng trình duyệt, xóa dữ liệu, thêm 1 lần đổi MAC & reset mạng, nghỉ 30s...")
                     if driver:
                         try: driver.quit()
                         except: pass
                     network_ok = self.perform_double_network_reset(wifi, net_type)
-                    self.rest_countdown(10)
+                    self.rest_countdown(30)
                     driver = self.setup_driver(is_headless)
                 elif self.loop_count > 1 and (self.loop_count - 1) % 25 == 0:
                     self.clear_log()
-                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Reset mạng 1 lần...")
-                    self.clean_tabs_and_cookies(driver)
-                    network_ok = self.fast_reconnect(wifi, net_type)
+                    self.log(f"Đã chạy xong {self.loop_count - 1} vòng. Thực hiện thêm 1 lần đổi MAC & reset mạng...")
+                    network_ok = self.perform_double_network_reset(wifi, net_type)
                 else:
                     network_ok = self.fast_reconnect(wifi, net_type)
                     
@@ -420,6 +518,9 @@ class DirectLinkApp:
                 if not network_ok:
                     self.log("⚠ Mạng lỗi/thiếu IPv6. Bỏ qua view này và thử lại ở vòng mới ngay...")
                     continue
+
+                if net_type == "Ethernet":
+                    self.prepare_next_mac(wifi)
 
                 self.log(f"Đang chạy URL (Vòng {self.loop_count})...")
                 self.load_url(driver, url)
@@ -450,10 +551,9 @@ class DirectLinkApp:
                 if result.returncode != 0 or ("successfully" not in output.lower() and "thành công" not in output.lower() and "hoàn tất" not in output.lower()):
                     subprocess.run(['netsh', 'wlan', 'connect', f'ssid={network_name}', f'name={network_name}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
             else:
-                ps_command = f'$randomMAC = ("02" + ((1..5) | ForEach-Object {{ "{{0:X2}}" -f (Get-Random -Min 0 -Max 256) }}) -join "").Replace(" ",""); Set-NetAdapterAdvancedProperty -Name "{network_name}" -DisplayName "Network Address" -DisplayValue $randomMAC -NoRestart; Restart-NetAdapter -Name "{network_name}"; Write-Output $randomMAC'
+                self.prepare_next_mac(network_name) # Đổi MAC mới cho lần reset này
+                ps_command = f'Restart-NetAdapter -Name "{network_name}"'
                 result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-                new_mac = result.stdout.strip()
-                self.log(f"Đã tạo MAC mới: {new_mac}")
                 time.sleep(1.0)
             
             if self.wait_for_internet(timeout=10 if net_type == "Ethernet" else 5):
@@ -490,10 +590,8 @@ class DirectLinkApp:
             else:
                 subprocess.run(['netsh', 'wlan', 'connect', f'ssid={network_name}', f'name={network_name}'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         else:
-            ps_command = f'$randomMAC = ("02" + ((1..5) | ForEach-Object {{ "{{0:X2}}" -f (Get-Random -Min 0 -Max 256) }}) -join "").Replace(" ",""); Set-NetAdapterAdvancedProperty -Name "{network_name}" -DisplayName "Network Address" -DisplayValue $randomMAC -NoRestart; Restart-NetAdapter -Name "{network_name}"; Write-Output $randomMAC'
+            ps_command = f'Restart-NetAdapter -Name "{network_name}"'
             result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            new_mac = result.stdout.strip()
-            self.log(f"Đã tạo MAC mới: {new_mac}")
 
         if self.wait_for_internet(timeout=10 if net_type == "Ethernet" else 5):
             self.log("✓ Internet (kèm IPv6) đã sẵn sàng.")
