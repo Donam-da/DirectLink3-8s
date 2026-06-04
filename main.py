@@ -120,6 +120,7 @@ class DirectLinkApp:
         self.is_running = False
         self.thread = None
         self.loop_count = 0
+        self.config_file = "config.json"
 
         # --- UI Setup ---
         pad_x = 10
@@ -137,7 +138,10 @@ class DirectLinkApp:
         tk.Label(root, text="URL cần chạy:", font=("Arial", 10, "bold")).grid(row=1, column=0, sticky="w", padx=pad_x, pady=pad_y)
         self.url_entry = tk.Entry(root, width=50, font=("Arial", 10))
         self.url_entry.grid(row=1, column=1, padx=pad_x, pady=pad_y)
-        self.url_entry.insert(0, "https://cryptolinkforearn.com/dl/eSYY2EjO")
+        
+        saved_url = self.load_saved_url()
+        if saved_url:
+            self.url_entry.insert(0, saved_url)
 
         # Options
         opt_frame = tk.Frame(root)
@@ -177,6 +181,33 @@ class DirectLinkApp:
         self.log_area.pack(fill="both", expand=True)
         
         root.grid_rowconfigure(5, weight=1)
+
+        # Bắt đầu kiểm tra hạn sử dụng định kỳ ngay cả khi không chạy bot
+        self.check_expiry_periodic()
+
+    def load_saved_url(self):
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    return config.get("url", "")
+            except Exception:
+                pass
+        return ""
+
+    def save_url(self, url):
+        try:
+            with open(self.config_file, "w", encoding="utf-8") as f:
+                json.dump({"url": url}, f)
+        except Exception:
+            pass
+
+    def check_expiry_periodic(self):
+        if datetime.datetime.now() > self.exp_date:
+            self.is_running = False # Tự động dừng Bot ngầm nếu có
+            messagebox.showwarning("Hết hạn", "Key kích hoạt của bạn đã hết thời gian sử dụng!\nPhần mềm sẽ tự động thoát.")
+            os._exit(0)
+        self.root.after(10000, self.check_expiry_periodic) # Kiểm tra lại sau mỗi 10 giây
 
     def log(self, message):
         """Ghi log ngắn gọn, tối giản an toàn cho luồng phụ (thread-safe)"""
@@ -279,6 +310,8 @@ class DirectLinkApp:
         if not wifi or not url:
             messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập đủ Tên Wi-Fi và URL!")
             return
+            
+        self.save_url(url)
 
         self.is_running = True
         self.start_btn.config(state="disabled")
@@ -318,10 +351,6 @@ class DirectLinkApp:
                 # Kiểm tra hạn sử dụng liên tục trong lúc chạy
                 if datetime.datetime.now() > self.exp_date:
                     self.log("⚠ KEY ĐÃ HẾT HẠN! Đang tắt phần mềm...")
-                    def force_exit():
-                        messagebox.showwarning("Hết hạn", "Key kích hoạt của bạn đã hết thời gian sử dụng!\nPhần mềm sẽ tự động thoát.")
-                        os._exit(0) # Ép buộc đóng hẳn toàn bộ file exe ngay lập tức
-                    self.root.after(0, force_exit)
                     break
 
                 if total_loops > 0 and self.loop_count >= total_loops:
