@@ -100,7 +100,6 @@ class KeyGenApp:
         if key:
             self.root.clipboard_clear()
             self.root.clipboard_append(key)
-            messagebox.showinfo("Thành công", "Đã copy Key vào khay nhớ tạm!")
 
 if __name__ == "__main__":
     root = tk.Tk()
